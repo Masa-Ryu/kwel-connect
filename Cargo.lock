@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "kwel-alfred"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "kwel-client",
  "kwel-native-host",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "kwel-client"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "kwel-native-host",
  "kwel-protocol",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "kwel-native-host"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "kwel-protocol",
  "libc",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "kwel-protocol"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "jsonschema",
  "serde",

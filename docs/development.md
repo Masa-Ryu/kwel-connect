@@ -74,10 +74,12 @@ or registration rewrite.
 
 ## Manual release
 
-The next patch is prepared as **1.0.1** for the Alfred Profile ID mismatch
-diagnostic in PR #4. It keeps Local Client Protocol v1 and the existing Native
-Host origin unchanged. Version preparation does not publish a Release; the
-existing v1.0.0 tag and Release must remain untouched.
+The next patch is prepared as **1.0.2** so the distributed Alfred Workflow
+includes the macOS first-launch warning and SHA-256 checksum guidance merged
+in PR #5. The v1.0.1 release introduced the Alfred Profile ID mismatch diagnostic
+in PR #4. Local Client Protocol v1 and the existing Native Host origin remain
+unchanged. Version preparation does not publish a Release; the existing
+v1.0.0 and v1.0.1 tags and Releases must remain untouched.
 
 Only the repository owner's explicit **Actions → Release → Run workflow**
 starts Release. Merging a PR, pushing main, or pushing a tag never starts it.
@@ -85,15 +87,15 @@ The Test workflow keeps its existing automatic triggers. The Release workflow
 must first be merged into the default branch to appear in the Actions UI.
 
 1. Prepare and review main with matching Cargo, distribution configuration and
-   Alfred Workflow versions. Check `python3 scripts/check-release-version.py v1.0.1`
+   Alfred Workflow versions. Check `python3 scripts/check-release-version.py v1.0.2`
    from that checkout, substituting the intended version.
 2. Create and push the matching tag yourself at the current main HEAD. For example,
    after fetching main, inspect `git rev-parse origin/main`, then run
-   `git tag v1.0.1 <that-full-SHA>` and `git push origin refs/tags/v1.0.1`.
+   `git tag v1.0.2 <that-full-SHA>` and `git push origin refs/tags/v1.0.2`.
    If the correct tag already exists, reuse it. If it points elsewhere, stop;
    do not force, move or overwrite it. Prepare a new version/tag when needed.
 3. Open **Actions → Release → Run workflow**, select branch **main**, enter
-   the existing tag (for example `v1.0.1`), and press **Run workflow**. This is
+   the existing tag (for example `v1.0.2`), and press **Run workflow**. This is
    the publication request; there is no second approval screen. After all
    validations succeed, the workflow publishes the five installers/Workflow
    files and `SHA256SUMS` automatically.
