@@ -83,6 +83,67 @@ export class CDP {
   close() { this.socket.close(); }
 }
 
+// These assertions run against real profile-scoped Chrome APIs and CDP targets.
+// An open-result alone cannot prove reuse, focus, state preservation or isolation.
+export async function verifyPageOpening({ a, b, selected, query, command, created }) {
+  const targets = async browser => (await browser.call('Target.getTargets')).targetInfos
+    .filter(value => value.type === 'page').map(({ targetId, url }) => ({ targetId, url }))
+    .sort((left, right) => left.targetId.localeCompare(right.targetId));
+  const activeTabs = browser => browser.evaluate(`chrome.tabs.query({active:true}).then(tabs=>tabs.map(tab=>tab.id).sort((a,b)=>a-b))`, browser.session);
+  const beforeA = await targets(a), beforeB = await targets(b), activeB = await activeTabs(b);
+  const existing = beforeA.filter(value => value.url === selected.url);
+  assert.equal(existing.length, 1, 'Expected exactly one existing fixture target in profile A.');
+  assert.ok(beforeB.some(value => value.url === selected.url), 'The isolation fixture must also be open in profile B.');
+  const target = existing[0];
+  const session = (await a.call('Target.attachToTarget', { targetId: target.targetId, flatten: true })).sessionId;
+  const state = randomUUID();
+  await a.evaluate(`(()=>{globalThis.__kwelOpenState=${JSON.stringify(state)};const input=document.createElement('input');input.id='kwel-open-state';input.value=${JSON.stringify(state)};document.body.append(input);return true;})()`, session);
+  const original = await a.evaluate(`chrome.tabs.query({}).then(tabs=>{const tab=tabs.find(tab=>tab.url===${JSON.stringify(selected.url)});return {id:tab.id,windowId:tab.windowId};})`, a.session);
+  // Move off the fixture first: opening an already active tab proves no switch.
+  await a.evaluate(`chrome.tabs.query({}).then(tabs=>chrome.tabs.update(tabs.find(tab=>tab.url===location.href).id,{active:true})).then(()=>true)`, a.session);
+  stage('cross profile openRef rejection');
+  await command(b.profile, ['open', '--ref', selected.openRef], 'RESULT_EXPIRED');
+  stage('focus existing target in original profile');
+  await command(a.profile, ['open', '--ref', selected.openRef]);
+  assert.deepEqual(await targets(a), beforeA, 'Opening an existing page created, closed or navigated a target.');
+  assert.ok(await a.evaluate(`globalThis.__kwelOpenState===${JSON.stringify(state)}&&document.getElementById('kwel-open-state')?.value===${JSON.stringify(state)}`, session), 'Opening an existing page reloaded or lost its document state.');
+  assert.ok(await a.evaluate(`(async()=>{const tab=await chrome.tabs.get(${original.id}),window=await chrome.windows.get(${original.windowId});return tab.active&&tab.windowId===window.id&&window.focused;})()`, a.session), 'The existing tab and its window were not activated.');
+  stage('reject openRef reused after focus');
+  await command(a.profile, ['open', '--ref', selected.openRef], 'RESULT_EXPIRED');
+  assert.deepEqual(await targets(a), beforeA, 'A reused reference changed profile A targets.');
+  assert.deepEqual(await targets(b), beforeB, 'Opening in profile A changed profile B targets.');
+  assert.deepEqual(await activeTabs(b), activeB, 'Opening in profile A activated a tab in profile B.');
+
+  stage('open missing target in original profile');
+  const closed = a.event(value => value.method === 'Target.targetDestroyed' && value.params.targetId === target.targetId);
+  await a.call('Target.closeTarget', { targetId: target.targetId });
+  await closed;
+  const missing = await targets(a);
+  assert.ok(!missing.some(value => value.url === selected.url), 'The no-match fixture is still open.');
+  const fresh = (await command(a.profile, ['search', '--query', query, '--limit', '20'])).items.find(value => value.url === selected.url);
+  assert.ok(fresh, 'The closed fixture is missing from actual Kwel search results.');
+  const beforeIds = new Set(missing.map(value => value.targetId));
+  const opened = a.event(value => ['Target.targetCreated', 'Target.targetInfoChanged'].includes(value.method) && value.params.targetInfo.url === selected.url && !beforeIds.has(value.params.targetInfo.targetId));
+  await command(a.profile, ['open', '--ref', fresh.openRef]);
+  const newTarget = (await opened).params.targetInfo;
+  created.push([a, newTarget.targetId]);
+  const afterCreate = await targets(a);
+  assert.equal(afterCreate.length, missing.length + 1, 'A missing page must create exactly one target.');
+  assert.equal(afterCreate.filter(value => value.url === selected.url).length, 1, 'Opening a missing page created duplicate targets.');
+  assert.notEqual(newTarget.targetId, target.targetId, 'A missing page did not receive a new target.');
+  stage('reject openRef reused after creation');
+  await command(a.profile, ['open', '--ref', fresh.openRef], 'RESULT_EXPIRED');
+  assert.deepEqual(await targets(a), afterCreate, 'A reused creation reference changed profile A targets.');
+  assert.deepEqual(await targets(b), beforeB, 'Creating in profile A changed profile B targets.');
+  assert.deepEqual(await activeTabs(b), activeB, 'Creating in profile A activated a tab in profile B.');
+  return {
+    existingTargetReusedWithDocumentStateAndWindowFocus: true,
+    missingTargetCreatedExactlyOnce: true,
+    crossProfileOpenRefRejectedAndOtherProfileTabsUnchanged: true,
+    openRefSingleUseAfterFocusAndCreate: true,
+  };
+}
+
 async function main() {
   if (flags[0] === 'prepare') {
     const root = mkdtempSync(path.join(tmpdir(), 'kwel-connect-e2e-'));
@@ -208,19 +269,9 @@ async function main() {
       await command(browser.profile, ['search', '--query', '', '--limit', '20']);
     }
     evidence.checks.rankingUrlsEmptySearchAndProfileIsolation = true;
-    const [a, b] = browsers, selected = a.results[0];
-    stage('cross profile openRef rejection');
-    await command(b.profile, ['open', '--ref', selected.openRef], 'RESULT_EXPIRED');
-    const beforeA = new Set((await a.call('Target.getTargets')).targetInfos.map(value => value.targetId));
-    const beforeB = new Set((await b.call('Target.getTargets')).targetInfos.map(value => value.targetId));
-    const opened = a.event(value => ['Target.targetCreated', 'Target.targetInfoChanged'].includes(value.method) && value.params.targetInfo.url === selected.url && !beforeA.has(value.params.targetInfo.targetId));
-    stage('open in original profile');
-    await command(a.profile, ['open', '--ref', selected.openRef]);
-    const target = (await opened).params.targetInfo; created.push([a, target.targetId]);
-    assert.ok(!(await b.call('Target.getTargets')).targetInfos.some(value => value.url === selected.url && !beforeB.has(value.targetId)), 'openRef opened in another Chrome profile.');
-    stage('reject reused openRef');
-    await command(a.profile, ['open', '--ref', selected.openRef], 'RESULT_EXPIRED');
-    evidence.checks.openInOriginalProfileCrossProfileRejectionAndSingleUse = true;
+    const [a, b] = browsers, selected = a.results.find(value => value.url === `${base}/shared`);
+    assert.ok(selected, 'The shared two-profile fixture is missing.');
+    Object.assign(evidence.checks, await verifyPageOpening({ a, b, selected, query, command, created }));
     writeFileSync(output, JSON.stringify(evidence, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     console.log('Real Google Chrome / Kwel / installed Host E2E passed. Alfred UI and OS approval prompts require separate manual evidence.');
   } finally {

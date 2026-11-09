@@ -7,6 +7,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { verifyPageOpening } from '../test-chrome-e2e.mjs';
 const script = fileURLToPath(new URL('../test-chrome-e2e.mjs', import.meta.url));
 
 test('the public unpacked test key preserves only the published Host identity', () => {
@@ -38,3 +39,41 @@ test('Chrome plans allocate fresh, marked temporary profiles and reject unsafe e
     }
   } finally { rmSync(root, { recursive: true }); }
 });
+
+for (const [fault, expected] of [
+  ['duplicate', /created, closed or navigated/],
+  ['reload', /reloaded or lost its document state/],
+  ['inactive', /were not activated/],
+  ['other-profile', /changed profile B targets/],
+]) {
+  test(`the opening verifier rejects a false success with ${fault} behavior (guard only)`, async () => {
+    const url = 'http://127.0.0.1/fixture';
+    let opened = false;
+    const browser = role => ({
+      profile: role, session: role,
+      targets: [{ type: 'page', targetId: role, url }],
+      async call(method) {
+        if (method === 'Target.getTargets') return { targetInfos: this.targets };
+        if (method === 'Target.attachToTarget') return { sessionId: 'fixture' };
+        throw new Error('Unexpected guard command.');
+      },
+      async evaluate(expression) {
+        if (expression.includes('query({active:true})')) return [role === 'A' ? 1 : 2];
+        if (expression.includes('return {id:tab.id,windowId:tab.windowId}')) return { id: 1, windowId: 1 };
+        if (expression.startsWith('globalThis.__kwelOpenState===')) return !(opened && fault === 'reload');
+        if (expression.includes('return tab.active')) return fault !== 'inactive';
+        return true;
+      },
+    });
+    const a = browser('A'), b = browser('B');
+    const command = async (profile, _args, failureCode) => {
+      if (profile === 'A' && !failureCode) {
+        opened = true;
+        if (fault === 'duplicate') a.targets.push({ type: 'page', targetId: 'duplicate', url });
+        if (fault === 'other-profile') b.targets.push({ type: 'page', targetId: 'foreign', url });
+      }
+      return { ok: true };
+    };
+    await assert.rejects(verifyPageOpening({ a, b, selected: { url, openRef: 'opaque' }, query: 'fixture', command, created: [] }), expected);
+  });
+}
