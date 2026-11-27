@@ -14,12 +14,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "io-util", "net", "sync", "time"] }
 uuid = { version = "1.18", features = ["v4"] }
-url = "2.5"
+url = "2.5.9"
 semver = "1.0"
 sha2 = "0.11"
 subtle = "2.6"
 libc = "0.2"
-rustix = { version = "1.1", features = ["process"] }
+rustix = { version = "1.1.6", features = ["process"] }
 tempfile = "3.23"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_Pipes", "Win32_System_Memory", "Win32_System_SystemServices"] }
 winreg = "0.56"
