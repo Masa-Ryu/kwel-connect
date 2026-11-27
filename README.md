@@ -71,6 +71,6 @@ Turn Local Connection OFF, then uninstall using **Kwel Connect Uninstaller** in 
 
 ## For launcher developers
 
-[Local Client Protocol v1](docs/local-client-protocol-v1.md) can be used from other languages. See also the [Native Messaging specification](docs/native-messaging-v1.md), [security documentation](docs/security.md), and [development guide](docs/development.md).
+Launchers can use [Local Client v1](docs/local-client-protocol-v1.md) or opt into [Local Client v2](docs/local-client-protocol-v2.md) for match fields, optional page-text snippets and pagination. The JSON CLI defaults to v1 and accepts `--protocol 2` with a compatible Kwel connection. Alfred uses v1 and can find page-text matches when the selected Kwel profile authorizes sharing. See [Native Messaging v1](docs/native-messaging-v1.md), [Native Messaging v2](docs/native-messaging-v2.md), [security](docs/security.md) and [development](docs/development.md).
 
 Official support covers the Host for the three operating systems and the Alfred Workflow. Third-party launcher developers are responsible for the implementation, quality, and behavior of their launchers.

@@ -1,6 +1,7 @@
 use kwel_native_host::{ipc, paths::RuntimePaths};
 use kwel_protocol::{
-    Code, Error, LocalRequest, LocalResponse, MAX_MESSAGE_BYTES, Message, Profile, Result, VERSION,
+    Code, Error, LocalRequest, LocalResponse, MAX_MESSAGE_BYTES, Message, Profile, Result,
+    SearchRequestV2, VERSION, VERSION_2,
 };
 use std::{collections::BTreeMap, time::Duration};
 #[derive(Clone)]
@@ -17,7 +18,28 @@ impl Client {
         request.validate()?;
         let message = request.message();
         let response = self.exchange(&request).await?;
-        if response.version() != VERSION || response.request_id() != message.request_id {
+        if message.v == VERSION_2 && response.version() == VERSION {
+            if legacy_rejection(&response, &message.request_id) {
+                return Err(Error(Code::IncompatibleVersion));
+            }
+            // An older Host cannot decode the new fields. Confirm its generic
+            // decode error with a probe that v1 understands. Never replay the
+            // original search or open operation.
+            if (message.cursor.is_some() || message.include_snippet.is_some())
+                && matches!(&response, LocalResponse::Error { request_id, code: Code::InvalidRequest, .. } if request_id.is_empty())
+            {
+                let request_id = uuid::Uuid::new_v4().to_string();
+                let probe = LocalRequest::Probe {
+                    v: VERSION_2,
+                    request_id: request_id.clone(),
+                    profile_id: message.profile_id.clone(),
+                };
+                if legacy_rejection(&self.exchange(&probe).await?, &request_id) {
+                    return Err(Error(Code::IncompatibleVersion));
+                }
+            }
+        }
+        if response.version() != message.v || response.request_id() != message.request_id {
             return Err(Error(Code::InvalidRequest));
         }
         match (&request, &response) {
@@ -40,13 +62,22 @@ impl Client {
                 LocalResponse::Search {
                     items, has_more, ..
                 },
-            ) => Message {
+            ) if message.v == VERSION => Message {
                 request_id: message.request_id.clone(),
                 items: items.clone(),
                 has_more: Some(*has_more),
                 ..Message::new("search-result")
             }
             .response(&message.request_id, false, message.limit)?,
+            (
+                LocalRequest::Search { .. } | LocalRequest::SearchV2(_),
+                LocalResponse::SearchV2(result),
+            ) => {
+                result.validate(&message.request_id, message.limit)?;
+                if message.include_snippet != Some(true) && result.has_snippets() {
+                    return Err(Error(Code::SearchFailed));
+                }
+            }
             (LocalRequest::Open { .. }, LocalResponse::Open { ok: true, .. }) => {}
             _ => return Err(Error(Code::InvalidRequest)),
         }
@@ -110,6 +141,15 @@ impl Client {
         Ok(profiles)
     }
 }
+
+fn legacy_rejection(response: &LocalResponse, expected_id: &str) -> bool {
+    matches!(
+        response,
+        LocalResponse::Error { v: VERSION, request_id, code: Code::IncompatibleVersion, .. }
+            if request_id == expected_id
+    )
+}
+
 pub enum Operation {
     Version,
     Profiles,
@@ -141,6 +181,12 @@ pub fn parse_args(arguments: &[String], format: &str) -> Result<Operation> {
             Err(Error(Code::InvalidRequest))
         };
     }
+    let v = match values.remove("--protocol") {
+        None => VERSION,
+        Some("1") if format == "json" => VERSION,
+        Some("2") if format == "json" => VERSION_2,
+        _ => return Err(Error(Code::InvalidRequest)),
+    };
     let profile_id = values
         .remove("--profile-id")
         .unwrap_or("")
@@ -149,7 +195,7 @@ pub fn parse_args(arguments: &[String], format: &str) -> Result<Operation> {
     let request_id = uuid::Uuid::new_v4().to_string();
     let request = match operation.as_str() {
         "profile-probe" => LocalRequest::Probe {
-            v: VERSION,
+            v,
             request_id,
             profile_id,
         },
@@ -160,18 +206,35 @@ pub fn parse_args(arguments: &[String], format: &str) -> Result<Operation> {
                 .unwrap_or("20")
                 .parse()
                 .map_err(|_| Error(Code::InvalidRequest))?;
-            LocalRequest::Search {
-                v: VERSION,
-                request_id,
-                profile_id,
-                query,
-                limit,
+            if v == VERSION_2 {
+                let cursor = values.remove("--cursor").map(str::to_owned);
+                let include_snippet = values
+                    .remove("--include-snippet")
+                    .map(str::parse)
+                    .transpose()
+                    .map_err(|_| Error(Code::InvalidRequest))?;
+                LocalRequest::SearchV2(SearchRequestV2::new(
+                    request_id,
+                    profile_id,
+                    query,
+                    limit,
+                    cursor,
+                    include_snippet,
+                ))
+            } else {
+                LocalRequest::Search {
+                    v,
+                    request_id,
+                    profile_id,
+                    query,
+                    limit,
+                }
             }
         }
         "open" | "open-page" => {
             let open_ref = values.remove("--ref").unwrap_or("").to_string();
             LocalRequest::Open {
-                v: VERSION,
+                v,
                 request_id,
                 profile_id,
                 open_ref,

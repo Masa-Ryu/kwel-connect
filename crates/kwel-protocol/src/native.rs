@@ -1,5 +1,6 @@
 //! Native-only fields. Public client routing and private migration operations
 //! deliberately cannot be encoded/decoded through this channel.
+use crate::search_v2::optional;
 use crate::*;
 use serde::{Deserializer, Serializer};
 
@@ -36,6 +37,18 @@ enum Wire {
         query: String,
         #[serde(default = "default_limit")]
         limit: u32,
+        #[serde(
+            default,
+            deserialize_with = "optional",
+            skip_serializing_if = "Option::is_none"
+        )]
+        cursor: Option<String>,
+        #[serde(
+            default,
+            deserialize_with = "optional",
+            skip_serializing_if = "Option::is_none"
+        )]
+        include_snippet: Option<bool>,
     },
     SearchResult {
         v: u32,
@@ -61,6 +74,8 @@ enum Wire {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         message: String,
     },
+    #[serde(untagged)]
+    SearchResultV2(SearchResultV2),
 }
 
 pub(super) fn validate(message: &Message) -> Result<()> {
@@ -97,11 +112,15 @@ impl From<Wire> for Message {
                 request_id,
                 query,
                 limit,
+                cursor,
+                include_snippet,
             } => Self {
                 v,
                 request_id,
                 query,
                 limit,
+                cursor,
+                include_snippet,
                 ..Self::new("search")
             },
             Wire::SearchResult {
@@ -114,6 +133,12 @@ impl From<Wire> for Message {
                 request_id,
                 items,
                 has_more: Some(has_more),
+                ..Self::new("search-result")
+            },
+            Wire::SearchResultV2(result) => Self {
+                v: VERSION_2,
+                request_id: result.request_id.clone(),
+                search_result_v2: Some(result),
                 ..Self::new("search-result")
             },
             Wire::OpenPage {
@@ -173,15 +198,21 @@ impl TryFrom<&Message> for Wire {
                     request_id,
                     query: message.query.clone(),
                     limit: message.limit,
+                    cursor: message.cursor.clone(),
+                    include_snippet: message.include_snippet,
                 }
             }
             "search-result" => {
                 message.response(&request_id, false, MAX_RESULTS)?;
-                Self::SearchResult {
-                    v,
-                    request_id,
-                    items: message.items.clone(),
-                    has_more: message.has_more.ok_or(Error(Code::InvalidRequest))?,
+                if let Some(result) = &message.search_result_v2 {
+                    Self::SearchResultV2(result.clone())
+                } else {
+                    Self::SearchResult {
+                        v,
+                        request_id,
+                        items: message.items.clone(),
+                        has_more: message.has_more.ok_or(Error(Code::InvalidRequest))?,
+                    }
                 }
             }
             "open-page" => {

@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Masa-Ryu/kwel-connect/raw/main/docs/schemas/native-messaging-v2.schema.json",
+  "title": "Kwel Native Messaging v2",
+  "$defs": {
+    "version": { "type": "integer", "const": 2 },
+    "requestId": { "type": "string", "minLength": 1, "maxLength": 100, "x-utf16-maxLength": 100 },
+    "uuid": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "profileLabel": {
+      "type": "string",
+      "maxLength": 64,
+      "x-utf16-maxLength": 64,
+      "not": { "pattern": "[\\r\\n]" },
+      "default": ""
+    },
+    "query": { "type": "string", "maxLength": 200, "x-utf16-maxLength": 200 },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+    "cursor": { "type": "string", "maxLength": 2000, "x-utf16-maxLength": 2000 },
+    "nativeErrorCode": {
+      "enum": [
+        "BAD_REQUEST", "INVALID_REQUEST", "INCOMPATIBLE_VERSION", "NOT_READY", "RESULT_EXPIRED",
+        "OPEN_FAILED", "SEARCH_FAILED", "PROFILE_CONFLICT", "HOST_NOT_FOUND", "DISCONNECTED",
+        "TIMEOUT", "PERMISSION_REQUIRED"
+      ]
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "url", "domain", "openRef", "matchedIn"],
+      "properties": {
+        "title": {
+          "type": "string",
+          "pattern": "[^\\u0009-\\u000d\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]"
+        },
+        "url": { "type": "string", "pattern": "^[Hh][Tt][Tt][Pp][Ss]?://" },
+        "domain": { "type": "string" },
+        "openRef": { "$ref": "#/$defs/uuid" },
+        "matchedIn": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["title", "url", "bookmark", "body"] }
+        },
+        "snippet": { "type": "string", "maxLength": 160 }
+      },
+      "if": { "required": ["snippet"] },
+      "then": { "properties": { "matchedIn": { "contains": { "const": "body" } } } }
+    },
+    "searchResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "requestId", "items", "nextCursor", "partialSources"],
+      "properties": {
+        "v": { "$ref": "#/$defs/version" },
+        "type": { "const": "search-result" },
+        "requestId": { "$ref": "#/$defs/requestId" },
+        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/item" } },
+        "nextCursor": { "anyOf": [{ "$ref": "#/$defs/cursor", "minLength": 1 }, { "type": "null" }] },
+        "partialSources": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["history", "bookmark", "body"] }
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "x-direction": "extension-to-host",
+      "additionalProperties": false,
+      "required": ["v", "type", "profileId"],
+      "properties": {
+        "v": { "$ref": "#/$defs/version" },
+        "type": { "const": "hello" },
+        "profileId": { "$ref": "#/$defs/uuid" },
+        "profileLabel": { "$ref": "#/$defs/profileLabel" }
+      }
+    },
+    {
+      "type": "object",
+      "x-direction": "host-to-extension",
+      "additionalProperties": false,
+      "required": ["v", "type"],
+      "properties": { "v": { "$ref": "#/$defs/version" }, "type": { "enum": ["hello-ack", "ping"] } }
+    },
+    {
+      "type": "object",
+      "x-direction": "extension-to-host",
+      "additionalProperties": false,
+      "required": ["v", "type"],
+      "properties": { "v": { "$ref": "#/$defs/version" }, "type": { "const": "pong" } }
+    },
+    {
+      "type": "object",
+      "x-direction": "host-to-extension",
+      "additionalProperties": false,
+      "required": ["v", "type", "requestId", "query"],
+      "properties": {
+        "v": { "$ref": "#/$defs/version" },
+        "type": { "const": "search" },
+        "requestId": { "$ref": "#/$defs/requestId" },
+        "query": { "$ref": "#/$defs/query" },
+        "limit": { "$ref": "#/$defs/limit", "default": 20 },
+        "cursor": { "$ref": "#/$defs/cursor" },
+        "includeSnippet": { "type": "boolean", "default": false }
+      }
+    },
+    { "$ref": "#/$defs/searchResult", "x-direction": "extension-to-host" },
+    {
+      "type": "object",
+      "x-direction": "host-to-extension",
+      "additionalProperties": false,
+      "required": ["v", "type", "requestId", "openRef"],
+      "properties": {
+        "v": { "$ref": "#/$defs/version" },
+        "type": { "const": "open-page" },
+        "requestId": { "$ref": "#/$defs/requestId" },
+        "openRef": { "type": "string", "minLength": 1, "maxLength": 100, "x-utf16-maxLength": 100 }
+      }
+    },
+    {
+      "type": "object",
+      "x-direction": "extension-to-host",
+      "additionalProperties": false,
+      "required": ["v", "type", "requestId", "ok"],
+      "properties": {
+        "v": { "$ref": "#/$defs/version" },
+        "type": { "const": "open-result" },
+        "requestId": { "$ref": "#/$defs/requestId" },
+        "ok": { "const": true }
+      }
+    },
+    {
+      "type": "object",
+      "x-direction": "extension-to-host",
+      "additionalProperties": false,
+      "required": ["v", "type", "code"],
+      "properties": {
+        "v": { "$ref": "#/$defs/version" },
+        "type": { "const": "error" },
+        "requestId": { "anyOf": [{ "$ref": "#/$defs/requestId" }, { "type": "null" }], "default": null },
+        "code": { "$ref": "#/$defs/nativeErrorCode" },
+        "message": { "type": "string", "default": "" }
+      }
+    }
+  ],
+  "$comment": "The protocol also enforces UTF-16 limits, JSON syntax and framing, full URL checks, request correlation, snippet opt-in and session behavior."
+}

@@ -79,3 +79,9 @@ This proves real Chrome-launched **source-built** Host communication, not OS ins
 [Masa-Ryu/kwel#227](https://github.com/Masa-Ryu/kwel/issues/227) changes ordinary Kwel UI activation and Native `open-page` to prefer an existing tab in the connected profile. Native Messaging v1 and Local Client Protocol v1 stay unchanged: clients send only `openRef` and receive the existing `open-result { ok: true }`. Tab IDs and the focus/create outcome are never returned to the Host or CLI.
 
 This verifier deliberately rejects the former always-create behavior. The Kwel pair job continues resolving the latest Connect main/PR #1 under its existing rules; it must consume this updated verifier before the Kwel navigation PR can pass its required pair check. Record both source SHAs for a local paired-branch run; that run does not attest the automatically selected CI pair or an eventual merge SHA.
+
+## Native and Local v2 pairing
+
+Use the two disposable profiles above and a Kwel build with page-text search. Open local fixture documents with a shared search term present only in their body and distinct URLs by profile. Enable Local Connection through Kwel Settings. Compare the [v2 CLI](local-client-protocol-v2.md#json-cli) results with Kwel's search order and verify that only explicit snippet requests return excerpts. Concatenate pages through `nextCursor` and open a result from a later page. Test cross-profile use, reuse, and an openRef obtained before blocking its page.
+
+Run an unmodified v1 CLI against the same Host and check that result fields conform to the v1 schema. Repeat basic search and open with a v1 extension on the new Host and with the current extension on a v1 Host. Confirm that each Native v1 connection reports `INCOMPATIBLE_VERSION` to the v2 CLI. An upgraded profile with its legacy grant should expose only its previously authorized sources until the user enables the updated sharing scope.

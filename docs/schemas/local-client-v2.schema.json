@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Masa-Ryu/kwel-connect/raw/main/docs/schemas/local-client-v2.schema.json",
+  "title": "Kwel Local Client v2",
+  "$defs": {
+    "version": { "type": "integer", "const": 2 },
+    "requestId": { "$ref": "native-messaging-v2.schema.json#/$defs/requestId" },
+    "uuid": { "$ref": "native-messaging-v2.schema.json#/$defs/uuid" },
+    "request": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["v", "type", "requestId", "profileId"],
+          "properties": {
+            "v": { "$ref": "#/$defs/version" },
+            "type": { "const": "profile-probe" },
+            "requestId": { "$ref": "#/$defs/requestId" },
+            "profileId": { "$ref": "#/$defs/uuid" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["v", "type", "requestId", "profileId", "query", "limit"],
+          "properties": {
+            "v": { "$ref": "#/$defs/version" },
+            "type": { "const": "search" },
+            "requestId": { "$ref": "#/$defs/requestId" },
+            "profileId": { "$ref": "#/$defs/uuid" },
+            "query": { "$ref": "native-messaging-v2.schema.json#/$defs/query" },
+            "limit": { "$ref": "native-messaging-v2.schema.json#/$defs/limit" },
+            "cursor": { "$ref": "native-messaging-v2.schema.json#/$defs/cursor" },
+            "includeSnippet": { "type": "boolean", "default": false }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["v", "type", "requestId", "profileId", "openRef"],
+          "properties": {
+            "v": { "$ref": "#/$defs/version" },
+            "type": { "const": "open-page" },
+            "requestId": { "$ref": "#/$defs/requestId" },
+            "profileId": { "$ref": "#/$defs/uuid" },
+            "openRef": { "$ref": "#/$defs/uuid" }
+          }
+        }
+      ]
+    },
+    "response": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["v", "type", "requestId", "profileId", "profileLabel", "hostVersion"],
+          "properties": {
+            "v": { "$ref": "#/$defs/version" },
+            "type": { "const": "profile-info" },
+            "requestId": { "$ref": "#/$defs/requestId" },
+            "profileId": { "$ref": "#/$defs/uuid" },
+            "profileLabel": { "$ref": "native-messaging-v2.schema.json#/$defs/profileLabel" },
+            "hostVersion": { "type": "string", "minLength": 1, "maxLength": 100 }
+          }
+        },
+        { "$ref": "native-messaging-v2.schema.json#/$defs/searchResult" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["v", "type", "requestId", "ok"],
+          "properties": {
+            "v": { "$ref": "#/$defs/version" },
+            "type": { "const": "open-result" },
+            "requestId": { "$ref": "#/$defs/requestId" },
+            "ok": { "const": true }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["v", "type", "requestId", "code", "message"],
+          "properties": {
+            "v": { "$ref": "#/$defs/version" },
+            "type": { "const": "error" },
+            "requestId": { "type": "string" },
+            "code": {
+              "anyOf": [
+                { "$ref": "native-messaging-v2.schema.json#/$defs/nativeErrorCode" },
+                { "enum": ["BUSY", "UNSAFE_PATH", "INSTALL_CONFLICT", "DOWNGRADE_REFUSED", "HOST_IN_USE"] }
+              ]
+            },
+            "message": { "type": "string" }
+          }
+        }
+      ]
+    }
+  },
+  "oneOf": [{ "$ref": "#/$defs/request" }, { "$ref": "#/$defs/response" }],
+  "$comment": "Register the adjacent Native v2 schema under its $id for offline validation. The protocol also enforces framing, UTF-16 bounds, URL checks, hostVersion bytes, and per-request/session correlation."
+}

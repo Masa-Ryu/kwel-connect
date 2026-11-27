@@ -3,6 +3,7 @@ use kwel_native_host::{ipc, paths::RuntimePaths, server};
 use kwel_protocol::{
     Code, EXTENSION_ID, Error, Item, LocalResponse, MAX_MESSAGE_BYTES, Message, Result,
 };
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::sync::mpsc;
 const A: &str = "00000000-0000-4000-8000-00000000000a";
@@ -17,6 +18,10 @@ struct Host {
 }
 impl Host {
     async fn start(profile: &str) -> Self {
+        Self::start_at_version(profile, 1).await
+    }
+
+    async fn start_at_version(profile: &str, v: u32) -> Self {
         let directory = support::directory();
         let paths =
             RuntimePaths::at(directory.path().canonicalize().unwrap().join("runtime")).unwrap();
@@ -30,20 +35,18 @@ impl Host {
             );
         input
             .send(Ok(Message {
+                v,
                 profile_id: profile.into(),
                 profile_label: "Fixture".into(),
                 ..Message::new("hello")
             }))
             .await
             .unwrap();
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(3), output.recv())
-                .await
-                .unwrap()
-                .unwrap()
-                .kind,
-            "hello-ack"
-        );
+        let ack = tokio::time::timeout(Duration::from_secs(3), output.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((ack.v, ack.kind.as_str()), (v, "hello-ack"));
         Self {
             _directory: directory,
             paths,
@@ -94,6 +97,189 @@ fn result(id: &str) -> Message {
         }],
         ..Message::new("search-result")
     }
+}
+
+fn rich_result(request_id: &str, snippet: bool) -> Value {
+    let mut item = json!({
+        "title":"Reading notes","url":"https://example.com/notes","domain":"example.com",
+        "openRef":REF,"matchedIn":["body"]
+    });
+    if snippet {
+        item["snippet"] = json!("Kyoto 日本語");
+    }
+    json!({
+        "v":2,"type":"search-result","requestId":request_id,"items":[item],
+        "nextCursor":"continuation","partialSources":["body"]
+    })
+}
+
+#[tokio::test]
+async fn native_v2_relays_opted_in_metadata_and_projects_v1_on_the_same_port() {
+    let mut host = Host::start_at_version(A, 2).await;
+    let mut rich = search(A, "rich");
+    rich["v"] = json!(2);
+    rich["cursor"] = json!("previous");
+    rich["includeSnippet"] = json!(true);
+    let task = tokio::spawn(exchange(host.paths.clone(), A, rich));
+    let request = host.next().await;
+    assert_eq!(request.v, 2);
+    assert_eq!(request.cursor.as_deref(), Some("previous"));
+    assert_eq!(request.include_snippet, Some(true));
+    assert_ne!(request.request_id, "rich");
+    assert!(request.profile_id.is_empty());
+    let mut reply = rich_result(&request.request_id, true);
+    host.input
+        .send(kwel_protocol::decode_native(
+            &serde_json::to_vec(&reply).unwrap(),
+        ))
+        .await
+        .unwrap();
+    reply["requestId"] = json!("rich");
+    assert_eq!(serde_json::to_value(task.await.unwrap()).unwrap(), reply);
+
+    let task = tokio::spawn(exchange(host.paths.clone(), A, search(A, "legacy")));
+    let request = host.next().await;
+    assert_eq!(request.v, 2);
+    assert_eq!((request.cursor, request.include_snippet), (None, None));
+    host.input
+        .send(kwel_protocol::decode_native(
+            &serde_json::to_vec(&rich_result(&request.request_id, false)).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(task.await.unwrap()).unwrap(),
+        json!({"v":1,"type":"search-result","requestId":"legacy","hasMore":true,
+            "items":[{"title":"Reading notes","url":"https://example.com/notes","domain":"example.com","openRef":REF}]})
+    );
+
+    let open = json!({"v":2,"type":"open-page","profileId":A,"requestId":"open","openRef":REF});
+    let task = tokio::spawn(exchange(host.paths.clone(), A, open.clone()));
+    let request = host.next().await;
+    assert_eq!((request.v, request.open_ref.as_str()), (2, REF));
+    host.input
+        .send(Ok(Message {
+            v: 2,
+            request_id: request.request_id,
+            ok: true,
+            ..Message::new("open-result")
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        task.await.unwrap(),
+        LocalResponse::Open { v: 2, ok: true, .. }
+    ));
+    assert!(matches!(
+        exchange(host.paths.clone(), A, open).await,
+        LocalResponse::Error {
+            v: 2,
+            code: Code::ResultExpired,
+            ..
+        }
+    ));
+    host.stop().await;
+}
+
+#[tokio::test]
+async fn v2_requests_on_a_v1_port_report_incompatibility_without_forwarding() {
+    let mut host = Host::start(A).await;
+    let mut rich = search(A, "rich");
+    rich["v"] = json!(2);
+    rich["includeSnippet"] = json!(true);
+    let probe = json!({"v":2,"type":"profile-probe","requestId":"probe","profileId":A});
+    for (request, id) in [(rich, "rich"), (probe, "probe")] {
+        assert!(matches!(exchange(host.paths.clone(), A, request).await,
+            LocalResponse::Error { v: 2, code: Code::IncompatibleVersion, request_id, .. } if request_id == id));
+    }
+    assert!(host.output.try_recv().is_err());
+    host.stop().await;
+}
+
+#[tokio::test]
+async fn wrong_native_version_closes_the_session_without_completing_search() {
+    let mut host = Host::start_at_version(A, 2).await;
+    let task = tokio::spawn(exchange(host.paths.clone(), A, search(A, "legacy")));
+    let request = host.next().await;
+    host.input
+        .send(Ok(result(&request.request_id)))
+        .await
+        .unwrap();
+    assert!(matches!(
+        task.await.unwrap(),
+        LocalResponse::Error {
+            v: 1,
+            code: Code::Disconnected,
+            ..
+        }
+    ));
+    assert_eq!(
+        host.task.await.unwrap(),
+        Err(Error(Code::IncompatibleVersion))
+    );
+}
+
+#[tokio::test]
+async fn unsolicited_snippets_cannot_reach_local_clients_or_issue_references() {
+    let mut host = Host::start_at_version(A, 2).await;
+    let mut search = search(A, "no-snippet");
+    search["v"] = json!(2);
+    let task = tokio::spawn(exchange(host.paths.clone(), A, search));
+    let request = host.next().await;
+    host.input
+        .send(kwel_protocol::decode_native(
+            &serde_json::to_vec(&rich_result(&request.request_id, true)).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        task.await.unwrap(),
+        LocalResponse::Error {
+            v: 2,
+            code: Code::SearchFailed,
+            ..
+        }
+    ));
+    let open = json!({"v":2,"type":"open-page","requestId":"open","profileId":A,"openRef":REF});
+    assert!(matches!(
+        exchange(host.paths.clone(), A, open).await,
+        LocalResponse::Error {
+            v: 2,
+            code: Code::ResultExpired,
+            ..
+        }
+    ));
+    assert!(host.output.try_recv().is_err());
+    host.stop().await;
+}
+
+#[tokio::test]
+async fn restoring_a_maximally_escaped_local_id_preserves_a_full_frame_and_cursor() {
+    let mut host = Host::start_at_version(A, 2).await;
+    let local_id = "\0".repeat(kwel_protocol::MAX_REQUEST_ID_UNITS);
+    let mut request = search(A, &local_id);
+    request["v"] = json!(2);
+    let task = tokio::spawn(exchange(host.paths.clone(), A, request));
+    let request = host.next().await;
+    assert_ne!(request.request_id, local_id);
+    let mut reply = rich_result(&request.request_id, false);
+    let padding = MAX_MESSAGE_BYTES - serde_json::to_vec(&reply).unwrap().len();
+    reply["items"][0]["title"] = json!(format!("Reading notes{}", "x".repeat(padding)));
+    let bytes = serde_json::to_vec(&reply).unwrap();
+    assert_eq!(bytes.len(), MAX_MESSAGE_BYTES);
+    host.input
+        .send(kwel_protocol::decode_native(&bytes))
+        .await
+        .unwrap();
+    let response = serde_json::to_value(task.await.unwrap()).unwrap();
+    assert_eq!(response["requestId"], local_id);
+    assert_eq!(response["nextCursor"], reply["nextCursor"]);
+    assert_eq!(response["items"], reply["items"]);
+    assert_eq!(
+        serde_json::to_vec(&response).unwrap().len(),
+        MAX_MESSAGE_BYTES
+    );
+    host.stop().await;
 }
 
 #[tokio::test]
@@ -322,7 +508,7 @@ async fn invalid_hello_never_publishes_an_endpoint() {
             ..Message::new("hello")
         },
         Message {
-            v: 2,
+            v: 3,
             profile_id: A.into(),
             ..Message::new("hello")
         },
@@ -333,13 +519,17 @@ async fn invalid_hello_never_publishes_an_endpoint() {
         let (input, receiver) = mpsc::channel(4);
         let (sender, mut output) = mpsc::channel(4);
         input.send(Ok(hello)).await.unwrap();
-        let result = server::run_transport(
-            &format!("chrome-extension://{EXTENSION_ID}/"),
-            paths.clone(),
-            receiver,
-            sender,
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            server::run_transport(
+                &format!("chrome-extension://{EXTENSION_ID}/"),
+                paths.clone(),
+                receiver,
+                sender,
+            ),
         )
-        .await;
+        .await
+        .expect("invalid hello must stop the transport");
         assert!(result.is_err());
         assert!(output.recv().await.is_none());
         assert!(paths.profiles().unwrap().is_empty());

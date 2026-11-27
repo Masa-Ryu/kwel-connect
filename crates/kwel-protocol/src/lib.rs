@@ -1,12 +1,13 @@
 //! Wire definitions shared by the Native Messaging and public local protocols.
 //! Neither protocol depends on Alfred. See docs/ for language-neutral schemas.
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     fmt,
     io::{Read, Write},
 };
 
 pub const VERSION: u32 = 1;
+pub const VERSION_2: u32 = 2;
 pub const MAX_MESSAGE_BYTES: usize = 1_000_000;
 pub const MAX_LOCAL_REQUEST_BYTES: usize = 16_384;
 pub const MAX_QUERY_UNITS: usize = 200;
@@ -117,6 +118,18 @@ pub fn id(value: &str) -> bool {
 pub fn units(value: &str) -> usize {
     value.encode_utf16().count()
 }
+fn deserialize_version<'de, D: Deserializer<'de>, const VERSION: u32>(
+    deserializer: D,
+) -> std::result::Result<u32, D::Error> {
+    let version = u32::deserialize(deserializer)?;
+    if version == VERSION {
+        Ok(version)
+    } else {
+        Err(serde::de::Error::custom(
+            "Unexpected version for this message shape",
+        ))
+    }
+}
 pub fn valid_origin(value: &str, extension: &str) -> bool {
     extension.len() == 32
         && extension.bytes().all(|b| (b'a'..=b'p').contains(&b))
@@ -135,8 +148,18 @@ pub struct Item {
     pub domain: String,
     pub open_ref: String,
 }
-// Internal request representation. Only native::Wire owns Native JSON fields;
-// LocalRequest owns public IPC routing; Host coordination uses private Control IPC.
+fn valid_result_item(title: &str, url: &str, open_ref: &str) -> bool {
+    !title.trim().is_empty() && http_url(url) && id(open_ref)
+}
+
+mod search_v2;
+pub use search_v2::{
+    MAX_CURSOR_UNITS, MAX_SNIPPET_SCALARS, MatchField, SearchItemV2, SearchRequestV2,
+    SearchResultV2, SearchSource,
+};
+
+// Internal representation. Native messages and Local requests each select
+// their own wire fields. Host coordination uses private Control IPC.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Message {
     pub v: u32,
@@ -144,11 +167,14 @@ pub struct Message {
     pub request_id: String,
     pub query: String,
     pub limit: u32,
+    pub cursor: Option<String>,
+    pub include_snippet: Option<bool>,
     pub profile_id: String,
     pub profile_label: String,
     pub open_ref: String,
     pub items: Vec<Item>,
     pub has_more: Option<bool>,
+    pub search_result_v2: Option<SearchResultV2>,
     pub code: Option<Code>,
     pub text: String,
     pub ok: bool,
@@ -174,7 +200,7 @@ impl Message {
         }
     }
     pub fn envelope(&self) -> Result<()> {
-        if self.v != VERSION {
+        if !matches!(self.v, VERSION | VERSION_2) {
             return Err(Error(Code::IncompatibleVersion));
         }
         if self.kind.is_empty() {
@@ -201,6 +227,11 @@ impl Message {
             || units(&self.request_id) > MAX_REQUEST_ID_UNITS
             || units(&self.query) > MAX_QUERY_UNITS
             || !(1..=MAX_RESULTS).contains(&self.limit)
+            || (self.v == VERSION && (self.cursor.is_some() || self.include_snippet.is_some()))
+            || self
+                .cursor
+                .as_ref()
+                .is_some_and(|cursor| units(cursor) > MAX_CURSOR_UNITS)
         {
             return Err(Error(Code::InvalidRequest));
         }
@@ -239,19 +270,40 @@ impl Message {
             if self.kind != "open-result" || !self.ok {
                 return Err(Error(Code::OpenFailed));
             }
-        } else if self.kind != "search-result"
-            || self.has_more.is_none()
-            || self.items.len() > limit.min(MAX_RESULTS) as usize
-            || self.items.iter().any(|item| {
-                item.title.trim().is_empty() || !http_url(&item.url) || !id(&item.open_ref)
-            })
-        {
-            return Err(Error(Code::SearchFailed));
+        } else {
+            if self.kind != "search-result" {
+                return Err(Error(Code::SearchFailed));
+            }
+            if self.v == VERSION_2 {
+                let result = self
+                    .search_result_v2
+                    .as_ref()
+                    .ok_or(Error(Code::SearchFailed))?;
+                result.validate(expected_id, limit)?;
+            } else if self.has_more.is_none()
+                || self.items.len() > limit.min(MAX_RESULTS) as usize
+                || self
+                    .items
+                    .iter()
+                    .any(|item| !valid_result_item(&item.title, &item.url, &item.open_ref))
+            {
+                return Err(Error(Code::SearchFailed));
+            }
         }
         Ok(())
     }
 }
+/// Decode the existing v1 contract, including its version rejection rules.
 pub fn decode(payload: &[u8]) -> Result<Message> {
+    let message = decode_native(payload)?;
+    if message.v != VERSION {
+        return Err(Error(Code::IncompatibleVersion));
+    }
+    Ok(message)
+}
+
+/// Decode either Native version. The transport checks the version bound at hello.
+pub fn decode_native(payload: &[u8]) -> Result<Message> {
     if payload.is_empty() || payload.len() > MAX_MESSAGE_BYTES {
         return Err(Error(Code::InvalidRequest));
     }
@@ -319,6 +371,8 @@ pub enum LocalRequest {
         #[serde(rename = "openRef")]
         open_ref: String,
     },
+    #[serde(untagged)]
+    SearchV2(SearchRequestV2),
 }
 impl LocalRequest {
     pub fn validate(&self) -> Result<()> {
@@ -337,7 +391,7 @@ impl LocalRequest {
         }
         message.profile_id.clear();
         match self {
-            Self::Search { .. } => message.search(),
+            Self::Search { .. } | Self::SearchV2(_) => message.search(),
             Self::Open { .. } => message.open(),
             Self::Probe { .. } => Ok(()),
         }
@@ -380,6 +434,22 @@ impl LocalRequest {
                 open_ref: open_ref.clone(),
                 ..Message::new("open-page")
             },
+            Self::SearchV2(search) => Message {
+                v: VERSION_2,
+                request_id: search.request_id.clone(),
+                profile_id: search.profile_id.to_lowercase(),
+                query: search.query.clone(),
+                limit: search.limit,
+                cursor: search.cursor.clone(),
+                include_snippet: search.include_snippet,
+                ..Message::new("search")
+            },
+        }
+    }
+    pub fn version(&self) -> u32 {
+        match self {
+            Self::Probe { v, .. } | Self::Search { v, .. } | Self::Open { v, .. } => *v,
+            Self::SearchV2(_) => VERSION_2,
         }
     }
 }
@@ -407,6 +477,7 @@ pub enum LocalResponse {
     },
     #[serde(rename = "search-result")]
     Search {
+        #[serde(deserialize_with = "deserialize_version::<_, VERSION>")]
         v: u32,
         #[serde(rename = "requestId")]
         request_id: String,
@@ -429,11 +500,16 @@ pub enum LocalResponse {
         code: Code,
         message: String,
     },
+    #[serde(untagged)]
+    SearchV2(SearchResultV2),
 }
 impl LocalResponse {
     pub fn profile(request_id: &str, profile: &Profile) -> Self {
+        Self::profile_at_version(VERSION, request_id, profile)
+    }
+    pub fn profile_at_version(v: u32, request_id: &str, profile: &Profile) -> Self {
         Self::Profile {
-            v: VERSION,
+            v,
             request_id: request_id.into(),
             profile_id: profile.profile_id.clone(),
             profile_label: profile.profile_label.clone(),
@@ -441,8 +517,11 @@ impl LocalResponse {
         }
     }
     pub fn error(request_id: &str, code: Code) -> Self {
+        Self::error_at_version(VERSION, request_id, code)
+    }
+    pub fn error_at_version(v: u32, request_id: &str, code: Code) -> Self {
         Self::Error {
-            v: VERSION,
+            v,
             request_id: request_id.into(),
             code,
             message: code.message().into(),
@@ -454,6 +533,7 @@ impl LocalResponse {
             | Self::Search { request_id, .. }
             | Self::Open { request_id, .. }
             | Self::Error { request_id, .. } => request_id,
+            Self::SearchV2(result) => &result.request_id,
         }
     }
     pub fn version(&self) -> u32 {
@@ -462,6 +542,7 @@ impl LocalResponse {
             | Self::Search { v, .. }
             | Self::Open { v, .. }
             | Self::Error { v, .. } => *v,
+            Self::SearchV2(_) => VERSION_2,
         }
     }
 }
