@@ -44,7 +44,7 @@ async fn run() -> Result<()> {
                 let mut stdin = io::stdin().lock();
                 loop {
                     let message = kwel_protocol::read_frame(&mut stdin, MAX_MESSAGE_BYTES)
-                        .and_then(|bytes| kwel_protocol::decode(&bytes));
+                        .and_then(|bytes| kwel_protocol::decode_native(&bytes));
                     if matches!(message, Err(Error(Code::Disconnected))) {
                         break;
                     }
